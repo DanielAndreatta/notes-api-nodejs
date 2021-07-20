@@ -1,103 +1,155 @@
+require('dotenv').config()
+require('./mongo')
+
 const express = require("express")
+const Sentry = require('@sentry/node');
+const Tracing = require("@sentry/tracing");
 const app = express()
 const cors = require('cors')
+const Note = require('./models/Note')
+const notFound = require('./middleware/notFound')
+const handleErrors = require('./middleware/handleErrors')
 
-const logger = require('./loggerMiddleware')
+
 
 app.use(cors())
 app.use(express.json())
+app.use('/images',express.static('images'))
 
-app.use(logger)
 
-let notes = [
-    {
-        id: 1,
-        content: "Me tengo que suscribir a @daniel en youtube y twitch",
-        date: "2019-05-30T17:30:31.098Z",
-        important:true
-    },
-    {
-        id: 2,
-        content: "Tengo que estudiar las clases del fullstack bootcamp",
-        date: "2019-05-30T18:39:34.091Z",
-        important:false
-    },
-    {
-        id: 3,
-        content: "Repasar los retos de JS de midudev",
-        date: "2019-05-30T19:20:14.298Z",
-        important:true
-    }
-]
+Sentry.init({
+    dsn: "https://936ac25051824c6f9168cf4e960c56d0@o921329.ingest.sentry.io/5867692",
+    integrations: [
+      // enable HTTP calls tracing
+      new Sentry.Integrations.Http({ tracing: true }),
+      // enable Express.js middleware tracing
+      new Tracing.Integrations.Express({ app }),
+    ],
+  
+    // Set tracesSampleRate to 1.0 to capture 100%
+    // of transactions for performance monitoring.
+    // We recommend adjusting this value in production
+    tracesSampleRate: 1.0,
+  });
+  
+  // RequestHandler creates a separate execution context using domains, so that every
+  // transaction/span/breadcrumb is attached to its own Hub instance
+  app.use(Sentry.Handlers.requestHandler());
+  // TracingHandler creates a trace for every incoming request
+  app.use(Sentry.Handlers.tracingHandler());
 
 
 app.get('/', (request, response) => {
     response.send('<h1>Hello Word</h1>')
 })
 
-app.get('/api/notes', (request, response) => {
+
+
+// con promesas
+// app.get('/api/notes', (request, response) => {
+//     Note.find({}).then( notes =>{
+//         response.json(notes)
+//     })
+// })
+
+// con async y await
+app.get('/api/notes', async (request, response) => {
+    const notes = await Note.find({})
     response.json(notes)
 })
 
-app.get('/api/notes/:id', (request, response) => {
+app.get('/api/notes/:id', (request, response, next) => {
     
-    const id = Number(request.params.id)
-    const note = notes.find(note => note.id === id)
+    const {id} = request.params
     
-    if (note) {
-        response.json(note)
-    } else {
-        response.status(404).end()
+    Note.findById(id).then( note => {
+        if (note) {
+            response.json(note)
+        } else {
+            response.status(404).end()
+        }
+    }).catch(err => {
+        next(err)
+    })
+})
+
+
+app.put('/api/notes/:id', (request, response, next) => {
+    
+    const {id} = request.params
+    const note = request.body
+
+    const newNoteInfo = {
+        content: note.content,
+        important: note.important
+    }
+
+    Note.findByIdAndUpdate(id, newNoteInfo, {new: true})
+        .then( result => {
+            response.json(result)
+        })
+        .catch (err => next(err))
+})
+
+app.delete('/api/notes/:id', async (request, response, next) => {
+    
+    const {id} = request.params
+    
+    try {
+        await Note.findByIdAndDelete(id)
+        response.status(204).end()
+    } catch (error) {
+        next(error)
     }
     
-})
-
-
-app.delete('/api/notes/:id', (request, response) => {
     
-    const id = Number(request.params.id)
-    notes = notes.filter(note => note.id !== id);
-    response.status(204).end();
 })
 
 
-app.post('/api/notes', (request, response) => {
+app.post('/api/notes', async (request, response, next) => {
     const note = request.body;
 
     if (!note || !note.content) {
         return response.status(400).json({
             error: 'note.content is missing'
         })
-        
     }
 
-    const ids = notes.map(note => note.id);
-    const maxId = Math.max(...ids);
-
-    const newNote = {
-        id: maxId + 1,
+    const newNote = new Note({
         content: note.content,
         important: typeof note.important !== 'undefined' ? note.important : false,
-        date: new Date().toISOString()
+        //important: note.important || false
+        date: new Date()
+    })
+
+    // con promesas
+    // newNote.save().then( savedNote => {
+    //     response.json(savedNote)
+    // }).catch (err => next(err))
+    // con async await
+    try {
+        const savedNote = await newNote.save()
+        response.json(savedNote)
+    } catch (error) {
+        next(error)
     }
 
-    notes = [...notes, newNote];
-
-    response.status(201).json(newNote);
 })
 
 
-app.use((request, response, next) => {
-    response.status(404).json({
-        error: 'Not found'
-    })
-})
+
+app.use(notFound)
+// The error handler must be before any other error middleware and after all controllers
+app.use(Sentry.Handlers.errorHandler());
+app.use(handleErrors)
+
 
 
 const PORT = process.env.PORT || 3001
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`)
 });
 
 
+module.exports = {app, server}
